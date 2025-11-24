@@ -16,7 +16,7 @@ Adafruit_INA219 ina219;
   float loadvoltage = 0;
   float current_mA = 0;
   float batteryvoltage = 0;
-  float status_temp = 0, status_current = 0, status_voltage = 0; 
+  float status=0;
 
 const char* ssid = "abc";
 const char* password = "12345678";
@@ -38,7 +38,7 @@ void setup() {
   // Cấu hình 12-bit, 128 samples, bus range 32V, PGA ÷8, continuous mode
   uint16_t config = 0;
   config |= (1 << 13);       // BRNG = 1 
-  config |= (1 << 11);       // PGA :2 
+  config |= (3 << 11);       // PG = 11 
   config |= (0xF << 7);      // BADC = 1111 
   config |= (0xF << 3);      // SADC = 1111 
   config |= 0x07;            // MODE continuous = 111 
@@ -85,20 +85,20 @@ void loop() {
     Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
     Serial.printf("LOW BATTERY - SAFETY CUTOFF ACTIVATED\n");
     digitalWrite(19, LOW);
-    status_voltage = 1;
+    status=1;
   } else {
     Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
-    status_voltage = 0;
+    status=0;
     digitalWrite(19, HIGH);
   } 
-  if (current_mA > 800) {
+  if (current_mA > 1000) {
     Serial.printf("Current: %.1f mA\n", current_mA);
     Serial.printf("OVERCURRENT - SAFETY CUTOFF ACTIVATED\n");
     digitalWrite(19, LOW);
-    status_current = 1;
+    status=1;
   } else {
     Serial.printf("Current: %.1f mA\n", current_mA);
-    status_current = 0;
+    status=0;
     digitalWrite(19, HIGH);
   }
 /* Serial.printf("shuntvolt: %.1f mV\n", shuntvoltage);
@@ -114,10 +114,10 @@ if (tempC == DEVICE_DISCONNECTED_C) {
   Serial.printf("Temperature: %.1f°C\n", tempC);
   Serial.printf("TEMPERATURE CRITICAL, SAFETY CUTOFF ACTIVATED\n"); 
   digitalWrite(19, LOW);
-  status_temp = 1;
+  status=1;
 } else {
   Serial.printf("Temperature: %.1f°C\n", tempC);
-  status_temp = 0;
+  status=0;
   digitalWrite(19, HIGH);
 }
 //Web
