@@ -20,34 +20,81 @@ Adafruit_INA219 ina219;
   float cur_sta=0;
   float bat_sta=0;
   float vol_sta=0;
-  float cir_sta=0;
+  float load_sta=0;
+  float charge_sta=1;
+  float sw=0;
+  float change_load=1;
+  float change_char=1;
 
-const char* ssid = "Bao Bao 2";
-const char* password = "15052012";
+const char* ssid = "abc";
+const char* password = "12345678";
 
-const char* mqtt_server = "192.168.102.8";
+const char* mqtt_server = "10.136.50.129";
 const int mqtt_port = 1883;
 const char* access_token = "2RP9CzGLNXtBpLiiiXs2";
+
+unsigned long reconnectTs = 0;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 
+void updateReconnectTs() {
+    reconnectTs = millis();
+    Serial.printf("MQTT reconnected, reconnectTs = %lu\n", reconnectTs);
+}
+
 void rpcCallback(char* topic, byte* payload, unsigned int length) {
-  String msg;
+      if (millis() - reconnectTs < 100) { // 100 ms margin
+        return;
+    }
 
-  for (int i = 0; i < length; i++) msg += (char)payload[i];
-  Serial.print("RPC received: ");
-  Serial.println(msg);
+    String msg = "";
+    for (int i = 0; i < length; i++) msg += (char)payload[i];
+    Serial.println("RPC: " + msg);
 
-  if (msg.indexOf("true") != -1) {
-      cir_sta=1;
-      digitalWrite(19, LOW);
-      Serial.println("Command: CUTOFF");
-  } else {
-      cir_sta=0;
-      digitalWrite(19, HIGH);
-      Serial.println("Command: RESTORE");
+  if (msg.indexOf("setLoad") != -1){
+      if (msg.indexOf("true") != -1) {
+        load_sta=0;
+        digitalWrite(19, HIGH);
+        change_load=1;
+        Serial.println("Command: RESTORE LOAD");
+  }   else {
+        load_sta=1;
+        digitalWrite(19, LOW);
+        change_load=1;
+        Serial.println("Command: CUTOFF LOAD");
+      }
   }
+
+  if (msg.indexOf("Sw") != -1){
+      if (msg.indexOf("true") != -1) {
+        sw=1;
+
+        load_sta=1;
+        digitalWrite(19, LOW);
+        change_load=1;
+        Serial.println("Command: SWITCH TO CHARGING");
+
+        charge_sta=0;
+        digitalWrite(17, HIGH);
+        change_char=1;
+  }   else {
+        sw=0;
+
+        charge_sta=1;
+        digitalWrite(17, LOW);
+        change_char=1;
+        Serial.println("Command: SWITCH TO LOAD");
+
+        load_sta=0;
+        digitalWrite(19, HIGH);
+        change_load=1;
+      }
+  }
+
+    String requestId = String(topic).substring(String(topic).lastIndexOf('/') + 1);
+    String responseTopic = "v1/devices/me/rpc/response/" + requestId;
+    client.publish(responseTopic.c_str(), "{}");
 }
 
 void setup() {
@@ -60,7 +107,7 @@ void setup() {
   // Cấu hình 12-bit, 128 samples, bus range 32V, PGA ÷8, continuous mode
   uint16_t config = 0;
   config |= (1 << 13);       // BRNG = 1 
-  config |= (3 << 11);       // PG = 11 
+  config |= (1 << 11);       // PGA : 11 
   config |= (0xF << 7);      // BADC = 1111 
   config |= (0xF << 3);      // SADC = 1111 
   config |= 0x07;            // MODE continuous = 111 
@@ -73,6 +120,10 @@ void setup() {
 
     // Vgs = 3.3V
   pinMode(19, OUTPUT);
+  digitalWrite(19, HIGH);
+
+  pinMode(17, OUTPUT);
+  digitalWrite(17, LOW);
 
   WiFi.begin(ssid, password);
   Serial.print("Connecting to WiFi");
@@ -104,17 +155,48 @@ void loop() {
   loadvoltage = ina219.getBusVoltage_V();
   current_mA = ina219.getCurrent_mA();
   batteryvoltage = loadvoltage + (shuntvoltage / 1000);
-  if(cir_sta==0){
-  if (batteryvoltage <= 6) {
+  if(sw==1){
+  if (batteryvoltage >=5) {
+    Serial.printf("Current: %.2f mA\n", current_mA);
+    Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
+    Serial.printf("FULL - SAFETY CUTOFF ACTIVATED\n");
+    digitalWrite(17, LOW);
+    charge_sta=1;
+    change_char=1;
+  }
+  else {
+    if (batteryvoltage <= 2.5) 
+  {
+    Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
+    Serial.printf("LOW VOLTAGE - SAFETY CUTOFF ACTIVATED\n");
+    digitalWrite(17, LOW);
+    vol_sta=1;
+  } else {
+    Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
+    vol_sta=0;
+  } 
+    if (current_mA > 800) {
+    Serial.printf("Current: %.1f mA\n", current_mA);
+    Serial.printf("OVERCURRENT - SAFETY CUTOFF ACTIVATED\n");
+    digitalWrite(17, LOW);
+    cur_sta=1;
+  } else {
+    Serial.printf("Current: %.1f mA\n", current_mA);
+    cur_sta=0;
+  }
+}
+  }
+  if(sw==0){
+  if (batteryvoltage <= 3) {
     Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
     Serial.printf("LOW BATTERY - SAFETY CUTOFF ACTIVATED\n");
     digitalWrite(19, LOW);
-    bat_sta=1;
+    vol_sta=1;
   } else {
     Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
-    bat_sta=0;
+    vol_sta=0;
   } 
-  if (current_mA > 1000) {
+  if (current_mA > 800) {
     Serial.printf("Current: %.1f mA\n", current_mA);
     Serial.printf("OVERCURRENT - SAFETY CUTOFF ACTIVATED\n");
     digitalWrite(19, LOW);
@@ -123,7 +205,6 @@ void loop() {
     Serial.printf("Current: %.1f mA\n", current_mA);
     cur_sta=0;
   }
-  if(cur_sta==1||temp_sta==1||vol_sta==1) cir_sta=1;
 }
 /* Serial.printf("shuntvolt: %.1f mV\n", shuntvoltage);
   Serial.printf("loadvolt: %.2f V\n", loadvoltage); */
@@ -136,13 +217,24 @@ if (tempC == DEVICE_DISCONNECTED_C) {
   Serial.printf("Sensor not found or CRC error!\n");
 } else if (tempC >= 30) {
   Serial.printf("Temperature: %.1f°C\n", tempC);
-  Serial.printf("TEMPERATURE CRITICAL, SAFETY CUTOFF ACTIVATED\n"); 
-  digitalWrite(19, LOW);
+  Serial.printf("TEMPERATURE CRITICAL, SAFETY CUTOFF ACTIVATED\n");
+  if(load_sta==0) digitalWrite(19, LOW);
+  if(charge_sta==0) digitalWrite(17, LOW);
   temp_sta=1;
 } else {
   Serial.printf("Temperature: %.1f°C\n", tempC);
   temp_sta=0;
 }
+  if(cur_sta==1||temp_sta==1||vol_sta==1){
+    if(load_sta==0){
+      load_sta=1;
+      change_load=1;
+    }
+    if(charge_sta==0){
+      charge_sta=1;
+      change_char=1;
+    }
+  }
 //Database
   if (!client.connected()) {
     while (!client.connected()) {
@@ -155,8 +247,26 @@ if (tempC == DEVICE_DISCONNECTED_C) {
     }
   }
 
-  String payload = "{\"Temperature(℃)\":" + String(tempC) + ",\"Voltage(V)\":" + String(batteryvoltage) + ",\"Current(mA)\":" + String(current_mA) +
-   ",\"Temperature status\":" + String(temp_sta) +  ",\"Current status\":" + String(cur_sta) +  ",\"Voltage status\":" + String(vol_sta) +  ",\"Circuit status\":" + String(cir_sta) + "}";
+String payload = "{";
+payload += "\"Temperature(℃)\":" + String(tempC);
+payload += ",\"Voltage(V)\":" + String(batteryvoltage);
+payload += ",\"Current(mA)\":" + String(current_mA);
+payload += ",\"Temperature status\":" + String(temp_sta);
+payload += ",\"Current status\":" + String(cur_sta);
+payload += ",\"Voltage status\":" + String(vol_sta);
+payload += ",\"Switch\":" + String(sw);
+
+if (change_load == 1) {
+    payload += ",\"Load status\":" + String(load_sta);
+    change_load =0;
+}
+
+if (change_char == 1) {
+    payload += ",\"Charge status\":" + String(charge_sta);
+    change_char =0;
+}
+payload += "}";
+
   Serial.println("Publishing data: " + payload);
 
   client.publish("v1/devices/me/telemetry", payload.c_str());
