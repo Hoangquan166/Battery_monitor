@@ -4,8 +4,13 @@
 #include <PubSubClient.h>
 #include <Wire.h> 
 #include <Adafruit_INA219.h>
+#include <EEPROM.h>
 
-#define ONE_WIRE_BUS 18 
+#define ONE_WIRE_BUS 18
+#define EE_DATA 0 
+#define EE_MAGIC 1 
+#define measure_interval 100 // đo mỗi 100ms
+#define save_interval 5000 // lưu mỗi 5s
 OneWire oneWire(ONE_WIRE_BUS); // khai bao chan GPIO 18 la chan onewire (DQ)
 DallasTemperature sensors(&oneWire); // setup oneWire lam chan truyen nhan data
 
@@ -16,15 +21,21 @@ Adafruit_INA219 ina219;
   float loadvoltage = 0;
   float current_mA = 0;
   float batteryvoltage = 0;
-  float temp_sta=0;
-  float cur_sta=0;
-  float bat_sta=0;
-  float vol_sta=0;
-  float load_sta=0;
-  float charge_sta=1;
-  float sw=0;
-  float change_load=1;
-  float change_char=1;
+  unsigned long last_time = 0;
+  float total_mAs = 0;
+  float SOC = 0;
+  unsigned long last_save = 0;
+  int last_button = HIGH; 
+  unsigned long debounce_t = 0;
+  float temp_sta=0;//temperature status
+  float cur_sta=0;//current status
+  float vol_sta=0;//voltage status
+  float bat_sta=0;//battery status
+  float load_sta=0;//load status
+  float charge_sta=1;//charge status
+  float sw=0;//discharge:0 , charge:1
+  float change_load=1;//change:1 , unchange:0
+  float change_char=1;//change:1 , unchange:0
 
 const char* ssid = "abc";
 const char* password = "12345678";
@@ -97,11 +108,41 @@ void rpcCallback(char* topic, byte* payload, unsigned int length) {
     client.publish(responseTopic.c_str(), "{}");
 }
 
+void savetoEEPROM() {
+    EEPROM.put(EE_MAGIC, 0x42);
+    EEPROM.put(EE_DATA, total_mAs);
+    EEPROM.commit();
+} 
+
+void loadfromEEPROM() {
+    uint8_t flag;
+    EEPROM.get(EE_MAGIC, flag);
+
+    if (flag == 0x42) {
+        EEPROM.get(EE_DATA, total_mAs);
+        Serial.printf("Loaded saved SOC from flash.");
+    } else {
+        total_mAs = 0;
+        Serial.printf("No valid data. Starting fresh.");
+    }
+}
+
+void resetCoulomb() {
+    total_mAs = 0;
+    savetoEEPROM();
+    Serial.printf("Coulomb counter RESET.");
+}
+
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200);
   sensors.begin();
   ina219.begin();
+  EEPROM.begin(32);
+  pinMode(15, INPUT_PULLUP);
+  loadfromEEPROM();
+  last_time = millis();
+  last_save = millis();
   Wire.begin(21,22);
   
   // Cấu hình 12-bit, 128 samples, bus range 32V, PGA ÷8, continuous mode
@@ -150,60 +191,86 @@ void setup() {
 
 void loop() {
   // put your main code here, to run repeatedly:
-    //INA219
+  unsigned long now = millis();
+  float dt = (now - last_time) / 1000.0;  // s
+  last_time = now;
+  //INA219
+  current_mA = ina219.getCurrent_mA();
   shuntvoltage = ina219.getShuntVoltage_mV();
   loadvoltage = ina219.getBusVoltage_V();
-  current_mA = ina219.getCurrent_mA();
   batteryvoltage = loadvoltage + (shuntvoltage / 1000);
   if(sw==1){
-  if (batteryvoltage >=5) {
-    Serial.printf("Current: %.2f mA\n", current_mA);
-    Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
+  if (batteryvoltage >=4.2) {
+    //Serial.printf("Current: %.2f mA\n", current_mA);
+    //Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
     Serial.printf("FULL - SAFETY CUTOFF ACTIVATED\n");
     digitalWrite(17, LOW);
     charge_sta=1;
     change_char=1;
   }
   else {
-    if (batteryvoltage <= 2.5) 
-  {
-    Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
-    Serial.printf("LOW VOLTAGE - SAFETY CUTOFF ACTIVATED\n");
-    digitalWrite(17, LOW);
-    vol_sta=1;
-  } else {
-    Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
-    vol_sta=0;
-  } 
-    if (current_mA > 800) {
-    Serial.printf("Current: %.1f mA\n", current_mA);
-    Serial.printf("OVERCURRENT - SAFETY CUTOFF ACTIVATED\n");
-    digitalWrite(17, LOW);
-    cur_sta=1;
-  } else {
-    Serial.printf("Current: %.1f mA\n", current_mA);
-    cur_sta=0;
-  }
-}
+    if (batteryvoltage <= 2.5) {
+      //Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
+      Serial.printf("LOW VOLTAGE - SAFETY CUTOFF ACTIVATED\n");
+      digitalWrite(17, LOW);
+      vol_sta=1;
+    }  else {
+      //Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
+      vol_sta=0;
+      }
+    if (current_mA > 1500) {
+      //Serial.printf("Current: %.1f mA\n", current_mA);
+      Serial.printf("OVERCURRENT - SAFETY CUTOFF ACTIVATED\n");
+      digitalWrite(17, LOW);
+      cur_sta=1;
+    } else {
+      //Serial.printf("Current: %.1f mA\n", current_mA);
+      cur_sta=0;
+      }
+    }
   }
   if(sw==0){
-  if (batteryvoltage <= 3) {
-    Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
-    Serial.printf("LOW BATTERY - SAFETY CUTOFF ACTIVATED\n");
+  if (batteryvoltage > 4.3) {
+    Serial.printf("OVERVOLTAGE\n");
+    //Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
     digitalWrite(19, LOW);
     vol_sta=1;
   } else {
-    Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
+    //Serial.printf("Battery Voltage: %.2f V\n", batteryvoltage);
     vol_sta=0;
-  } 
-  if (current_mA > 800) {
-    Serial.printf("Current: %.1f mA\n", current_mA);
-    Serial.printf("OVERCURRENT - SAFETY CUTOFF ACTIVATED\n");
+  }
+
+  if (current_mA > 3200) { 
+    Serial.printf("OVERCURRENT\n");
+    //Serial.printf("Current: %.1f mA\n", current_mA);
     digitalWrite(19, LOW);
     cur_sta=1;
   } else {
-    Serial.printf("Current: %.1f mA\n", current_mA);
+    //Serial.printf("Current: %.1f mA\n", current_mA);
     cur_sta=0;
+  }
+
+  total_mAs += current_mA*dt; 
+  if (now - last_save >= save_interval) { // Save after 5s
+    savetoEEPROM();
+    last_save = now;
+  } 
+  SOC = (0 - total_mAs)*100/3870000; 
+  Serial.printf("State of Charge: %.1f", SOC);
+
+  int reading = digitalRead(15);  // read button
+  if (reading != last_button) {  
+      debounce_t = now;           
+  }
+  if (now - debounce_t > 20) { // debounce
+    if (reading != last_button) {
+        if (reading == LOW) {
+            resetCoulomb();     
+      }
+
+      last_button = reading; 
+    }
+  }
   }
 }
 /* Serial.printf("shuntvolt: %.1f mV\n", shuntvoltage);
@@ -216,13 +283,13 @@ void loop() {
 if (tempC == DEVICE_DISCONNECTED_C) {
   Serial.printf("Sensor not found or CRC error!\n");
 } else if (tempC >= 30) {
-  Serial.printf("Temperature: %.1f°C\n", tempC);
+  //Serial.printf("Temperature: %.1f°C\n", tempC);
   Serial.printf("TEMPERATURE CRITICAL, SAFETY CUTOFF ACTIVATED\n");
   if(load_sta==0) digitalWrite(19, LOW);
   if(charge_sta==0) digitalWrite(17, LOW);
   temp_sta=1;
 } else {
-  Serial.printf("Temperature: %.1f°C\n", tempC);
+  //Serial.printf("Temperature: %.1f°C\n", tempC);
   temp_sta=0;
 }
   if(cur_sta==1||temp_sta==1||vol_sta==1){
@@ -255,6 +322,7 @@ payload += ",\"Temperature status\":" + String(temp_sta);
 payload += ",\"Current status\":" + String(cur_sta);
 payload += ",\"Voltage status\":" + String(vol_sta);
 payload += ",\"Switch\":" + String(sw);
+payload += ",\"SOC\":" + String(SOC);
 
 if (change_load == 1) {
     payload += ",\"Load status\":" + String(load_sta);
